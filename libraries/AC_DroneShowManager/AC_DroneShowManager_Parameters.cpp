@@ -205,6 +205,14 @@ const AP_Param::GroupInfo AC_DroneShowManager::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("ACC_FF_GAIN", 46, AC_DroneShowManager, _params.acceleration_feedforward_gain, 1.0f),
 
+    // @Param: ACC_FF_MAX
+    // @DisplayName: Acceleration feed-forward envelope fraction
+    // @Description: Largest fraction of the WPNAV acceleration limits that the show acceleration feed-forward may consume. Guided mode configures the shaping limit and the correction limit from the same WPNAV_ACCEL, so the remainder is the headroom left for the position controller to correct tracking error. Values close to 1 let a demanding trajectory saturate the controller.
+    // @Range: 0 1
+    // @Increment: 0.05
+    // @User: Advanced
+    AP_GROUPINFO("ACC_FF_MAX", 47, AC_DroneShowManager, _params.acceleration_feedforward_max_fraction, 0.7f),
+
     // @Param: TAKEOFF_ALT
     // @DisplayName: Takeoff altitude
     // @Description: Altitude above current position to take off to when starting the show

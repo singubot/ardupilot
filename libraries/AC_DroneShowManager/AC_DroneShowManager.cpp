@@ -194,6 +194,7 @@ bool AC_DroneShowManager::get_current_guided_mode_command_to_send(
     const uint8_t VELOCITY_WARNING = 2;
     const uint8_t YAW_WARNING = 4;
     const uint8_t ACCELERATION_WARNING = 8;
+    const uint8_t ACCELERATION_CLIPPED_WARNING = 16;
     static uint8_t warnings_sent = 0;
     // static uint8_t counter = 0;
 
@@ -286,19 +287,41 @@ bool AC_DroneShowManager::get_current_guided_mode_command_to_send(
 
             command.acc *= get_acceleration_feedforward_gain();
 
-            // Guided's PVA path limits correction separately from
-            // feed-forward. Bound the show feed-forward itself so enabling it
-            // cannot bypass the configured WPNAV acceleration envelope.
+            // Guided mode configures both the shaping limit and the correction
+            // limit from WPNAV_ACCEL, so feed-forward and the corrective term
+            // share a single acceleration envelope. Bounding feed-forward to
+            // the whole envelope would let the trajectory consume all of it and
+            // leave the position controller nothing to correct with. Reserve a
+            // fraction for correction instead.
             if (_wp_nav) {
+                const float envelope_fraction = constrain_float(
+                    get_acceleration_feedforward_max_fraction(), 0.0f, 1.0f
+                );
+                const float max_accel_xy = _wp_nav->get_wp_acceleration() * envelope_fraction;
+                const float max_accel_z = _wp_nav->get_accel_z() * envelope_fraction;
+
                 Vector2f accel_xy = command.acc.xy();
-                accel_xy.limit_length(_wp_nav->get_wp_acceleration());
+                const bool clipped_xy = accel_xy.limit_length(max_accel_xy);
                 command.acc.x = accel_xy.x;
                 command.acc.y = accel_xy.y;
-                command.acc.z = constrain_float(
-                    command.acc.z,
-                    -_wp_nav->get_accel_z(),
-                    _wp_nav->get_accel_z()
-                );
+
+                const float unclipped_z = command.acc.z;
+                command.acc.z = constrain_float(command.acc.z, -max_accel_z, max_accel_z);
+
+                // Silent truncation would look identical to a well-tracked show
+                // in the logs, so make the first occurrence visible. The show
+                // trajectory is meant to be audited against this envelope
+                // before flight; clipping here means that audit was wrong.
+                if ((clipped_xy || !is_equal(unclipped_z, command.acc.z)) &&
+                    !(warnings_sent & ACCELERATION_CLIPPED_WARNING))
+                {
+                    gcs().send_text(
+                        MAV_SEVERITY_WARNING,
+                        "Show accel FF clipped to %.0f%% of WPNAV envelope",
+                        static_cast<double>(envelope_fraction * 100)
+                    );
+                    warnings_sent |= ACCELERATION_CLIPPED_WARNING;
+                }
             }
 
             if (command.acc.is_nan() || command.acc.is_inf())
