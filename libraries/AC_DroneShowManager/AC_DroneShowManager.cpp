@@ -193,6 +193,7 @@ bool AC_DroneShowManager::get_current_guided_mode_command_to_send(
     const uint8_t POSITION_WARNING = 1;
     const uint8_t VELOCITY_WARNING = 2;
     const uint8_t YAW_WARNING = 4;
+    const uint8_t ACCELERATION_WARNING = 8;
     static uint8_t warnings_sent = 0;
     // static uint8_t counter = 0;
 
@@ -273,6 +274,41 @@ bool AC_DroneShowManager::get_current_guided_mode_command_to_send(
                     warnings_sent |= VELOCITY_WARNING;
                 }
                 command.vel.zero();
+            }
+        }
+
+        if (is_acceleration_control_enabled())
+        {
+            if (!get_desired_acceleration_neu_in_cms_per_seconds_squared_at_seconds(elapsed, command.acc))
+            {
+                command.acc.zero();
+            }
+
+            command.acc *= get_acceleration_feedforward_gain();
+
+            // Guided's PVA path limits correction separately from
+            // feed-forward. Bound the show feed-forward itself so enabling it
+            // cannot bypass the configured WPNAV acceleration envelope.
+            if (_wp_nav) {
+                Vector2f accel_xy = command.acc.xy();
+                accel_xy.limit_length(_wp_nav->get_wp_acceleration());
+                command.acc.x = accel_xy.x;
+                command.acc.y = accel_xy.y;
+                command.acc.z = constrain_float(
+                    command.acc.z,
+                    -_wp_nav->get_accel_z(),
+                    _wp_nav->get_accel_z()
+                );
+            }
+
+            if (command.acc.is_nan() || command.acc.is_inf())
+            {
+                if (!(warnings_sent & ACCELERATION_WARNING))
+                {
+                    gcs().send_text(MAV_SEVERITY_WARNING, "Invalid acceleration command; using zero");
+                    warnings_sent |= ACCELERATION_WARNING;
+                }
+                command.acc.zero();
             }
         }
 
@@ -378,6 +414,55 @@ bool AC_DroneShowManager::get_desired_velocity_neu_in_cms_per_seconds_at_seconds
     vel.y = vel_east / 10.0f;
     vel.z = vec.z / 10.0f;
     
+    return true;
+}
+
+bool AC_DroneShowManager::get_desired_acceleration_neu_in_cms_per_seconds_squared_at_seconds(float time, Vector3f& acc)
+{
+    // Keep the show controller and its output-time metadata synchronized with
+    // the requested wall-clock instant.
+    if (!_get_raw_show_control_output_at_seconds(time)) {
+        return false;
+    }
+
+    sb_trajectory_player_t* player = _show_controller.trajectory_player;
+    sb_screenplay_scene_t* scene = sb_show_controller_get_current_scene(&_show_controller);
+    if (!player || !scene) {
+        return false;
+    }
+
+    const sb_control_output_time_t output_time =
+        sb_show_controller_get_current_output_time(&_show_controller);
+    sb_time_axis_t* time_axis = sb_screenplay_scene_get_time_axis(scene);
+    sb_vector3_with_yaw_t vec;
+    float warped_rate = 1.0f;
+
+    if (
+        !time_axis ||
+        sb_trajectory_player_get_acceleration_at(
+            player, output_time.warped_time_in_scene_sec, &vec
+        ) != SB_SUCCESS
+    ) {
+        return false;
+    }
+
+    // For p(tau(t)), the trajectory-acceleration contribution in wall-clock
+    // time is p''(tau) * tau_dot^2. A later experimental variant adds the
+    // complementary p'(tau) * tau_ddot term for changing warp rates.
+    sb_time_axis_map_ex(time_axis, static_cast<int32_t>(output_time.time_msec), &warped_rate);
+    const float rate_squared = sq(warped_rate);
+    vec.x *= rate_squared;
+    vec.y *= rate_squared;
+    vec.z *= rate_squared;
+
+    const float orientation_rad = _show_coordinate_system.orientation_rad;
+    const float acc_north = cosf(orientation_rad) * vec.x + sinf(orientation_rad) * vec.y;
+    const float acc_east = sinf(orientation_rad) * vec.x - cosf(orientation_rad) * vec.y;
+
+    // Show trajectory units are mm/s/s; Guided expects cm/s/s.
+    acc.x = acc_north / 10.0f;
+    acc.y = acc_east / 10.0f;
+    acc.z = vec.z / 10.0f;
     return true;
 }
 
